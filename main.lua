@@ -1,5 +1,10 @@
 local Class = require('30log')
 
+-- Visual flare: how fast an alive cell warms up, and how fast its trail fades.
+local HEAT_RISE = 0.35
+local HEAT_DECAY = 0.6
+local HEAT_CUTOFF = 0.02
+
 Button = Class("Button")
 
 function Button:init(x, y, w, h, text)
@@ -88,7 +93,7 @@ function love.load()
 
 	cell = {width = 8, height = 8}
 	cell.aliveColor = {0.266, 0.537, 0.101, 1}
-	cell.deadColor = {0.2, 0.2, 0.2, 1}
+	cell.deadColor = {0.11, 0.12, 0.14, 1}
 
 	grid = {}
 	grid.showGrid = false
@@ -102,16 +107,46 @@ function love.load()
 	grid.width = grid.viewWidth * grid.worldWidth - 1
 	grid.height = grid.viewHeight * grid.worldHeight - 1
 	grid.data = {}
+	grid.heat = {}
 
 	camera = {x = 0, y = 0}
 	camera.maxX = math.max((grid.width + 1) * cell.width - screen.width, 0)
 	camera.maxY = math.max((grid.height + 1) * cell.height - screen.height, 0)
 
+	-- Palette and pre-rendered sprites for the glow/bloom look.
+	visuals = {}
+	visuals.birth = {0.85, 1, 0.7}
+	visuals.trail = {0.12, 0.34, 0.07}
+	visuals.glowColor = {0.35, 0.8, 0.25}
+
+	local function makeRadialSprite(w, h, alphaAt)
+		local data = love.image.newImageData(w, h)
+		for py = 0, h - 1 do
+			for px = 0, w - 1 do
+				local dx = (px + 0.5) / w * 2 - 1
+				local dy = (py + 0.5) / h * 2 - 1
+				local d = math.min(math.sqrt(dx * dx + dy * dy), 1)
+				data:setPixel(px, py, 1, 1, 1, alphaAt(d))
+			end
+		end
+		local image = love.graphics.newImage(data)
+		image:setFilter('linear', 'linear')
+		return image
+	end
+
+	visuals.glow = makeRadialSprite(32, 32, function(d) return (1 - d) ^ 2 end)
+	local glowSpan = cell.width * 2.6
+	visuals.glowScale = glowSpan / visuals.glow:getWidth()
+	visuals.glowPad = (glowSpan - cell.width) / 2
+	visuals.vignette = makeRadialSprite(40, 24, function(d) return math.min(d * d * 1.6, 0.7) end)
+
 	function grid:generateEmpty()
 		for x = -1, grid.width + 1 do
 			grid.data[x] = {}
+			grid.heat[x] = {}
 			for y = -1, grid.height + 1 do
 				grid.data[x][y] = 0
+				grid.heat[x][y] = 0
 			end
 		end
 
@@ -131,7 +166,9 @@ function love.load()
 		local r = math.random()
 		for x = -1, grid.width + 1 do
 			grid.data[x] = {}
+			grid.heat[x] = {}
 			for y = -1, grid.height + 1 do
+				grid.heat[x][y] = 0
 				if r >= chance then
 					grid.data[x][y] = 1
 					r = math.random()
@@ -177,18 +214,42 @@ function love.load()
 		local x1 = math.min(math.floor((camera.x + screen.width - 1) / cell.width), grid.width)
 		local y1 = math.min(math.floor((camera.y + screen.height - 1) / cell.height), grid.height)
 
+		-- Additive halo behind the cells that have been alive for a while.
+		love.graphics.setBlendMode('add')
+		for x = x0, x1 do
+			local px = x * cell.width - camera.x
+			for y = y0, y1 do
+				local heat = grid.heat[x][y] or 0
+				if heat > 0.5 and grid.data[x][y] == 1 then
+					local a = (heat - 0.5) * 2 * 0.5
+					love.graphics.setColor(visuals.glowColor[1] * a, visuals.glowColor[2] * a, visuals.glowColor[3] * a, 1)
+					love.graphics.draw(visuals.glow, px - visuals.glowPad, y * cell.height - camera.y - visuals.glowPad, 0, visuals.glowScale, visuals.glowScale)
+				end
+			end
+		end
+		love.graphics.setBlendMode('alpha')
+
 		for x = x0, x1 do
 			local px = x * cell.width - camera.x
 			for y = y0, y1 do
 				local py = y * cell.height - camera.y
+				local heat = grid.heat[x][y] or 0
 				if grid.data[x][y] == 0 then
-					love.graphics.setColor(cell.deadColor)
+					-- Dead cells fade their trail back into the dark.
+					love.graphics.setColor(
+						cell.deadColor[1] + (visuals.trail[1] - cell.deadColor[1]) * heat,
+						cell.deadColor[2] + (visuals.trail[2] - cell.deadColor[2]) * heat,
+						cell.deadColor[3] + (visuals.trail[3] - cell.deadColor[3]) * heat, 1)
 				else
-					love.graphics.setColor(cell.aliveColor)
+					-- Newborn cells flash bright and settle into the base green.
+					love.graphics.setColor(
+						visuals.birth[1] + (cell.aliveColor[1] - visuals.birth[1]) * heat,
+						visuals.birth[2] + (cell.aliveColor[2] - visuals.birth[2]) * heat,
+						visuals.birth[3] + (cell.aliveColor[3] - visuals.birth[3]) * heat, 1)
 				end
 				love.graphics.rectangle('fill', px, py, cell.width, cell.height)
 				if grid.showGrid == true then
-					love.graphics.setColor(0, 0, 0, 1)
+					love.graphics.setColor(0, 0, 0, 0.35)
 					love.graphics.rectangle('line', px, py, cell.width, cell.height)
 				end
 			end
@@ -231,6 +292,17 @@ function love.load()
 				else
 					temp.data[x][y] = BIRTH[n] and 1 or 0
 				end
+
+				-- Heat rises while a cell stays alive and decays once it dies, so
+				-- births flash bright, established cells glow and deaths leave a trail.
+				local heat = grid.heat[x][y] or 0
+				if temp.data[x][y] == 1 then
+					heat = math.min(heat + HEAT_RISE, 1)
+				else
+					heat = heat * HEAT_DECAY
+					if heat < HEAT_CUTOFF then heat = 0 end
+				end
+				grid.heat[x][y] = heat
 			end
 		end
 		grid.data = {}
@@ -337,8 +409,10 @@ function love.update(dt)
 			local gy = math.min(math.max(math.floor((mouse.y + camera.y) / cell.height), 0), grid.height)
 			if mouse.pressed then
 				grid.data[gx][gy] = 1
+				grid.heat[gx][gy] = 1
 			elseif mouse.delete then
 				grid.data[gx][gy] = 0
+				grid.heat[gx][gy] = 0
 			end
 		end
 	end
@@ -350,6 +424,8 @@ function love.draw()
 		button:draw()
 	elseif game.state == 'simulate' then
 		grid:draw()
+		love.graphics.setColor(0, 0, 0, 1)
+		love.graphics.draw(visuals.vignette, 0, 0, 0, screen.width / visuals.vignette:getWidth(), screen.height / visuals.vignette:getHeight())
 		if game.showHints then
 			game:drawDebug(screen.width / 2 - 300 / 2, 0)
 		end
