@@ -5,6 +5,9 @@ local HEAT_RISE = 0.35
 local HEAT_DECAY = 0.6
 local HEAT_CUTOFF = 0.02
 
+-- How many generations one frame may catch up on after a stall.
+local MAX_CATCHUP = 4
+
 Button = Class("Button")
 
 function Button:init(x, y, w, h, text)
@@ -45,7 +48,10 @@ function love.load()
 	game.running = false
 	game.state = 'menu'
 	game.time = 0
-	game.simulationTime = 0.02
+	-- Simulation speed: generations per second, picked from this ladder.
+	game.speeds = {1, 2, 3, 5, 8, 10, 15, 20, 30, 45, 60, 90, 120}
+	game.speedIndex = 6
+	game.gps = game.speeds[game.speedIndex]
 	game.generations = 0
 	game.chance = 0.45
 
@@ -320,6 +326,7 @@ function love.load()
 		love.graphics.printf("Generation : " .. game.generations, 0, 16, screen.width, 'center')
 		love.graphics.printf("MX["..math.floor((love.mouse.getX() + camera.x)/cell.width).."]["..math.floor((love.mouse.getY() + camera.y)/cell.height).."]", 0, 32, screen.width, 'center')
 	
+		love.graphics.printf('Press [ / ] To Slow Down / Speed Up The Simulation', 0, screen.height - 220, screen.width, 'center')
 		love.graphics.printf('Press Space To Start/Pause The Simulation', 0, screen.height - 200, screen.width, 'center')
 		love.graphics.printf('Press Enter To Step 1 Generation While Simulation is Paused', 0, screen.height - 180, screen.width, 'center')
 		love.graphics.printf('Press Escape To Open/Close This Screen', 0, screen.height - 160, screen.width, 'center')
@@ -332,6 +339,18 @@ function love.load()
 
 		menuButton:draw()
 		exitButton:draw()
+	end
+
+	-- Always-visible readout of whether the sim is running and how fast.
+	function game:drawHud()
+		local status = game.running and "RUNNING" or "PAUSED"
+		local color = game.running and {0.266, 0.537, 0.101, 1} or {0.9, 0.6, 0.15, 1}
+		local text = status .. "   " .. game.gps .. " gen/s"
+		love.graphics.setFont(mainMenu.smallFont)
+		love.graphics.setColor(0, 0, 0, 0.8)
+		love.graphics.print(text, 13, 11)
+		love.graphics.setColor(color)
+		love.graphics.print(text, 12, 10)
 	end
 end
 
@@ -374,10 +393,13 @@ function love.update(dt)
 		end
 	elseif game.state == 'simulate' then
 		if game.running then
-			game.time = game.time + 0.2 * dt
-			if game.time > game.simulationTime then
+			local interval = 1 / game.gps
+			-- Cap the backlog so a stalled frame or a window drag can't burn
+			-- through hundreds of generations in one go.
+			game.time = math.min(game.time + dt, interval * MAX_CATCHUP)
+			while game.time >= interval do
 				stepSimulation()
-				game.time = 0
+				game.time = game.time - interval
 			end
 		end
 		if game.showHints then
@@ -426,6 +448,7 @@ function love.draw()
 		grid:draw()
 		love.graphics.setColor(0, 0, 0, 1)
 		love.graphics.draw(visuals.vignette, 0, 0, 0, screen.width / visuals.vignette:getWidth(), screen.height / visuals.vignette:getHeight())
+		game:drawHud()
 		if game.showHints then
 			game:drawDebug(screen.width / 2 - 300 / 2, 0)
 		end
@@ -457,6 +480,9 @@ function love.keypressed(key)
 		else
 			grid.showGrid = true
 		end
+	elseif key == '[' or key == ']' then
+		game.speedIndex = math.min(math.max(game.speedIndex + (key == ']' and 1 or -1), 1), #game.speeds)
+		game.gps = game.speeds[game.speedIndex]
 	end
 end
 
