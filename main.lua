@@ -36,6 +36,7 @@ function love.load()
 
 	game = {}
 	game.showHints = true
+	game.dragging = false
 	game.running = false
 	game.state = 'menu'
 	game.time = 0
@@ -91,12 +92,20 @@ function love.load()
 
 	grid = {}
 	grid.showGrid = false
-	-- The loops below run 0..width inclusive, so the field is (width + 1) cells
-	-- wide. Subtract one to keep the last cell inside the window rather than
-	-- one row/column off-screen.
-	grid.width = math.floor(screen.width / cell.width) - 1
-	grid.height = math.floor(screen.height / cell.height) - 1
+	-- The world is this many viewports wide and tall; the camera pans across it
+	-- and grid:draw only paints the cells the viewport can see.
+	grid.worldWidth = 2
+	grid.worldHeight = 2
+	grid.viewWidth = math.floor(screen.width / cell.width)
+	grid.viewHeight = math.floor(screen.height / cell.height)
+	-- The loops below run 0..width inclusive, so the field is (width + 1) cells.
+	grid.width = grid.viewWidth * grid.worldWidth - 1
+	grid.height = grid.viewHeight * grid.worldHeight - 1
 	grid.data = {}
+
+	camera = {x = 0, y = 0}
+	camera.maxX = math.max((grid.width + 1) * cell.width - screen.width, 0)
+	camera.maxY = math.max((grid.height + 1) * cell.height - screen.height, 0)
 
 	function grid:generateEmpty()
 		for x = -1, grid.width + 1 do
@@ -162,22 +171,25 @@ function love.load()
 	end
 
 	function grid:draw()
-		for x = 0, grid.width do
-			for y = 0, grid.height do
+		-- Cull to the cells the viewport can actually see.
+		local x0 = math.max(math.floor(camera.x / cell.width), 0)
+		local y0 = math.max(math.floor(camera.y / cell.height), 0)
+		local x1 = math.min(math.floor((camera.x + screen.width - 1) / cell.width), grid.width)
+		local y1 = math.min(math.floor((camera.y + screen.height - 1) / cell.height), grid.height)
+
+		for x = x0, x1 do
+			local px = x * cell.width - camera.x
+			for y = y0, y1 do
+				local py = y * cell.height - camera.y
 				if grid.data[x][y] == 0 then
 					love.graphics.setColor(cell.deadColor)
-					love.graphics.rectangle('fill', x * cell.width, y * cell.height, cell.width, cell.height)
-					if grid.showGrid == true then
-						love.graphics.setColor(0, 0, 0, 1)
-						love.graphics.rectangle('line', x * cell.width, y * cell.height, cell.width, cell.height)
-					end
-				elseif grid.data[x][y] == 1 then
+				else
 					love.graphics.setColor(cell.aliveColor)
-					love.graphics.rectangle('fill', x * cell.width, y * cell.height, cell.width, cell.height)
-					if grid.showGrid == true then
-						love.graphics.setColor(0, 0, 0, 1)
-						love.graphics.rectangle('line', x * cell.width, y * cell.height, cell.width, cell.height)
-					end
+				end
+				love.graphics.rectangle('fill', px, py, cell.width, cell.height)
+				if grid.showGrid == true then
+					love.graphics.setColor(0, 0, 0, 1)
+					love.graphics.rectangle('line', px, py, cell.width, cell.height)
 				end
 			end
 		end
@@ -234,7 +246,7 @@ function love.load()
 		love.graphics.setColor(0, 0, 0, 1)
 		love.graphics.printf("FPS : " .. love.timer.getFPS(), 0, 3, screen.width, 'center')
 		love.graphics.printf("Generation : " .. game.generations, 0, 16, screen.width, 'center')
-		love.graphics.printf("MX["..math.floor(love.mouse.getX()/cell.width).."]["..math.floor(love.mouse.getY()/cell.height).."]", 0, 32, screen.width, 'center')
+		love.graphics.printf("MX["..math.floor((love.mouse.getX() + camera.x)/cell.width).."]["..math.floor((love.mouse.getY() + camera.y)/cell.height).."]", 0, 32, screen.width, 'center')
 	
 		love.graphics.printf('Press Space To Start/Pause The Simulation', 0, screen.height - 200, screen.width, 'center')
 		love.graphics.printf('Press Enter To Step 1 Generation While Simulation is Paused', 0, screen.height - 180, screen.width, 'center')
@@ -243,6 +255,8 @@ function love.load()
 		love.graphics.printf('Press R to Generate Random Data', 0, screen.height - 120, screen.width, 'center')
 		love.graphics.printf('Press E to Clear The Grid', 0, screen.height - 100, screen.width, 'center')
 		love.graphics.printf('Left Click to Draw Cells, Right Click to Remove Cells (While Paused)', 0, screen.height - 80, screen.width, 'center')
+		love.graphics.printf('Middle Click and Drag to Pan The Canvas', 0, screen.height - 60, screen.width, 'center')
+		love.graphics.printf('Mouse Wheel to Scroll The Canvas', 0, screen.height - 40, screen.width, 'center')
 
 		menuButton:draw()
 		exitButton:draw()
@@ -319,8 +333,8 @@ function love.update(dt)
 		elseif not game.running then
 			-- Painting is only allowed while the simulation is paused and the
 			-- hints panel is closed, so clicks can't paint under its buttons.
-			local gx = math.min(math.max(math.floor(mouse.x / cell.width), 0), grid.width)
-			local gy = math.min(math.max(math.floor(mouse.y / cell.height), 0), grid.height)
+			local gx = math.min(math.max(math.floor((mouse.x + camera.x) / cell.width), 0), grid.width)
+			local gy = math.min(math.max(math.floor((mouse.y + camera.y) / cell.height), 0), grid.height)
 			if mouse.pressed then
 				grid.data[gx][gy] = 1
 			elseif mouse.delete then
@@ -367,5 +381,35 @@ function love.keypressed(key)
 		else
 			grid.showGrid = true
 		end
+	end
+end
+
+local SCROLL_STEP = 3 -- cells panned per wheel notch
+
+local function panBy(dx, dy)
+	camera.x = math.min(math.max(camera.x + dx, 0), camera.maxX)
+	camera.y = math.min(math.max(camera.y + dy, 0), camera.maxY)
+end
+
+function love.wheelmoved(dx, dy)
+	if game.state ~= 'simulate' then return end
+	panBy(-dx * SCROLL_STEP * cell.width, -dy * SCROLL_STEP * cell.height)
+end
+
+function love.mousepressed(x, y, button)
+	if button == 3 then
+		game.dragging = true
+	end
+end
+
+function love.mousemoved(x, y, dx, dy)
+	if game.dragging then
+		panBy(-dx, -dy)
+	end
+end
+
+function love.mousereleased(x, y, button)
+	if button == 3 then
+		game.dragging = false
 	end
 end
