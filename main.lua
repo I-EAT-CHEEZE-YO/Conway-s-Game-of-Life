@@ -35,7 +35,7 @@ function love.load()
 	love.mouse.setPosition(screen.width/2, screen.height/2 + 125)
 
 	game = {}
-	game.debug = true
+	game.showHints = true
 	game.running = false
 	game.state = 'menu'
 	game.time = 0
@@ -45,6 +45,7 @@ function love.load()
 
 	mainMenu = {}
 	mainMenu.titleFont = love.graphics.newFont('assets/fonts/VT323.ttf', 64)
+	mainMenu.smallFont = love.graphics.newFont('assets/fonts/VT323.ttf', 22)
 	mainMenu.title = "Conway's Game of Life"
 	mainMenu.titleColor = {0.266, 0.537, 0.101, 1}
 	mainMenu.logo = love.graphics.newImage('assets/images/logo.png')
@@ -78,7 +79,7 @@ function love.load()
 		love.graphics.draw(mainMenu.logo, screen.width / 2 - mainMenu.logoWidth / 2 + 5, 182)
 		love.graphics.setColor(1, 1, 1, 1)
 		love.graphics.draw(mainMenu.logo, screen.width / 2 - mainMenu.logoWidth / 2, 175)
-		love.graphics.setNewFont('assets/fonts/VT323.ttf', 22)
+		love.graphics.setFont(mainMenu.smallFont)
 		love.graphics.setColor(0, 0, 0, 1)
 		love.graphics.print("Created By I_EAT_CHEEZE_YO ", screen.width - 240, screen.height - 25)
 		love.graphics.setColor(1, 1, 1, 1)
@@ -90,8 +91,11 @@ function love.load()
 
 	grid = {}
 	grid.showGrid = false
-	grid.width = screen.width / cell.width
-	grid.height = screen.height / cell.height
+	-- The loops below run 0..width inclusive, so the field is (width + 1) cells
+	-- wide. Subtract one to keep the last cell inside the window rather than
+	-- one row/column off-screen.
+	grid.width = math.floor(screen.width / cell.width) - 1
+	grid.height = math.floor(screen.height / cell.height) - 1
 	grid.data = {}
 
 	function grid:generateEmpty()
@@ -139,6 +143,10 @@ function love.load()
 		end
 
 	end
+
+	-- Conway's rules, indexed by live neighbour count.
+	SURVIVE = {[2] = true, [3] = true}
+	BIRTH = {[3] = true}
 
 	function neighbors(x, y)
 		local n = 0
@@ -196,22 +204,20 @@ function love.load()
 			grid.data[grid.width+1][y] = grid.data[0][y]
 		end
 
+		-- The loops above wrap the edges but not the corners of the halo ring,
+		-- which the corner cells read, so wrap those by hand.
+		grid.data[-1][-1] = grid.data[grid.width][grid.height]
+		grid.data[-1][grid.height+1] = grid.data[grid.width][0]
+		grid.data[grid.width+1][-1] = grid.data[0][grid.height]
+		grid.data[grid.width+1][grid.height+1] = grid.data[0][0]
+
 		for x = 0, grid.width do
 			for y = 0, grid.height do
+				local n = neighbors(x, y)
 				if grid.data[x][y] == 1 then
-					if neighbors(x, y) < 2 then
-						temp.data[x][y] = 0
-					end
-					if neighbors(x, y) == 2 or neighbors(x, y) == 3 then
-						temp.data[x][y] = 1
-					end
-					if neighbors(x, y) > 3 then
-						temp.data[x][y] = 0
-					end
-				elseif grid.data[x][y] == 0 then
-					if neighbors(x, y) == 3 then
-						temp.data[x][y] = 1
-					end
+					temp.data[x][y] = SURVIVE[n] and 1 or 0
+				else
+					temp.data[x][y] = BIRTH[n] and 1 or 0
 				end
 			end
 		end
@@ -236,7 +242,7 @@ function love.load()
 		love.graphics.printf('Press G to Toggle Grid Lines (Drops FPS)', 0, screen.height - 140, screen.width, 'center')
 		love.graphics.printf('Press R to Generate Random Data', 0, screen.height - 120, screen.width, 'center')
 		love.graphics.printf('Press E to Clear The Grid', 0, screen.height - 100, screen.width, 'center')
-		love.graphics.printf('Left Click to Draw Cells, Right Click to Remove Cells', 0, screen.height - 80, screen.width, 'center')
+		love.graphics.printf('Left Click to Draw Cells, Right Click to Remove Cells (While Paused)', 0, screen.height - 80, screen.width, 'center')
 
 		menuButton:draw()
 		exitButton:draw()
@@ -288,7 +294,7 @@ function love.update(dt)
 				game.time = 0
 			end
 		end
-		if game.debug then
+		if game.showHints then
 			if mouse.x > menuButton.x and mouse.x < menuButton.x + menuButton.width and mouse.y > menuButton.y and mouse.y < menuButton.y + menuButton.height then
 				menuButton.borderColor = {0, 0.245, 0, 1}
 				menuButton.color = {0.266, 0.537, 0.101, 1}
@@ -310,11 +316,15 @@ function love.update(dt)
 				exitButton.borderColor = {0.12, 0.12, 0.12, 1}
 				exitButton.color = {0.5, 0.5, 0.5, 1}
 			end
-		else
+		elseif not game.running then
+			-- Painting is only allowed while the simulation is paused and the
+			-- hints panel is closed, so clicks can't paint under its buttons.
+			local gx = math.min(math.max(math.floor(mouse.x / cell.width), 0), grid.width)
+			local gy = math.min(math.max(math.floor(mouse.y / cell.height), 0), grid.height)
 			if mouse.pressed then
-				grid.data[math.floor(mouse.x/cell.width)][math.floor(mouse.y/cell.height)] = 1
+				grid.data[gx][gy] = 1
 			elseif mouse.delete then
-				grid.data[math.floor(mouse.x/cell.width)][math.floor(mouse.y/cell.height)] = 0
+				grid.data[gx][gy] = 0
 			end
 		end
 	end
@@ -326,7 +336,7 @@ function love.draw()
 		button:draw()
 	elseif game.state == 'simulate' then
 		grid:draw()
-		if game.debug then
+		if game.showHints then
 			game:drawDebug(screen.width / 2 - 300 / 2, 0)
 		end
 	end
@@ -334,17 +344,12 @@ end
 
 function love.keypressed(key)
 	if key == 'escape' then
-		if game.debug == true then
-			game.debug = false
-		else
-			game.debug = true
-		end
+		game.showHints = not game.showHints
 	elseif key == 'space' then
 		if game.running == true then
 			game.running = false
 		else
 			game.running = true
-			game.debug = false
 		end
 	elseif key == 'return' then
 		if game.running == false then
